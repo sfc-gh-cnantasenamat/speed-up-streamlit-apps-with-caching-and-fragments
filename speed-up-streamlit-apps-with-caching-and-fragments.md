@@ -67,6 +67,8 @@ streamlit run before/streamlit_app.py --server.port 8601
 
 The dashboard opens at `http://localhost:8601`, with Region and Channel filters, metrics, a monthly active users chart, a data table, and a **Run timing** panel.
 
+![The before app on first load, with one Full script run in the Run timing panel](assets/before-app-first-load.png)
+
 <!-- ------------------------ -->
 ## Explore the Before App
 
@@ -107,7 +109,9 @@ Nothing is cached, so every run of the script reads the CSV twice: once through 
 
 ### Measure a Rerun
 
-Change the Region filter a few times and watch the **Run timing** panel. Each click logs a **Full script** run, because Streamlit reruns the entire file whenever a widget changes. The average rerun takes about as long as the first run, since every rerun redoes all the work.
+Change the Region filter a few times and watch the **Run timing** panel. Each click logs a **Full script** run, because Streamlit reruns the entire file whenever a widget changes. The reruns come in a little under the first run, which also pays one-time startup costs, but each one still reads the CSV twice and rebuilds everything on the page.
+
+![The before app after several filter changes: every run is logged as Full script](assets/before-app-full-script-reruns.png)
 
 <!-- ------------------------ -->
 ## Refactor with CoCo
@@ -199,6 +203,10 @@ def load_mau() -> pd.DataFrame:
 - **Reruns:** `load_filtered()` and `load_mau()` are cached too, so a repeat filter selection returns from the cache without reading the CSV at all.
 - **Cache keys:** The function arguments are part of the cache key. Each Region and Channel combination is computed once, and picking it again returns the stored result.
 
+After you click **Reset cache**, the after app's first run fills the cache with a single CSV read:
+
+![The after app on its first run after Reset cache, before any filter changes](assets/after-app-first-load.png)
+
 ### Things to Know
 
 - Locally and on Community Cloud, the cache is shared across all users and sessions of the app, not just your browser tab. If someone else already filled it, your "first run" is already fast. In Streamlit in Snowflake, this holds only on the container runtime; the warehouse runtime caches within a single viewer's session.
@@ -226,6 +234,8 @@ filtered_section()
 
 The Region and Channel filters live inside `filtered_section()`, so changing a filter now reruns just this section. The **Run timing** panel logs these runs as **Fragment only** instead of **Full script**.
 
+![The after app after several filter changes: each rerun is logged as Fragment only and returns from the cache](assets/after-app-fragment-reruns.png)
+
 ### When Fragments Help Most
 
 In this small app, the fragment covers most of the page, so most of the speedup comes from caching. Fragments pay off more as an app grows: a filter section in a fragment won't rerun other charts, tabs, or expensive sections elsewhere on the page.
@@ -240,12 +250,12 @@ streamlit run before/streamlit_app.py --server.port 8601
 streamlit run after/streamlit_app.py --server.port 8602
 ```
 
-In each app, click **Reset cache**, then change the Region filter a few times. In testing, the two apps compared like this:
+In each app, click **Reset cache**, then change the Region filter a few times. In the screenshots above, the two apps compared like this:
 
 | | Before | After |
 |---|---|---|
-| First run | ~0.5s (2 CSV reads) | ~0.3s (1 CSV read) |
-| Avg rerun | ~0.5s (2 CSV reads again) | ~0.02s (0 reads, fragment only) |
+| First run | ~1.5s (2 CSV reads, plus startup) | ~0.5s (1 CSV read) |
+| Avg rerun | ~0.8s (2 CSV reads again, full script) | ~0.07s (0 reads, fragment only) |
 
 Your numbers will vary with hardware, but the pattern holds: the before app redoes all its work on every click, and the after app reuses it. The gap is larger against a Snowflake warehouse, where each uncached rerun is a round trip to run a query.
 
