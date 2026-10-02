@@ -1,0 +1,309 @@
+author: Chanin Nantasenamat
+id: speed-up-streamlit-apps-with-caching-and-fragments
+categories: snowflake-site:taxonomy/solution-center/certification/quickstart, snowflake-site:taxonomy/product/applications-and-collaboration
+language: en
+summary: Use Cortex Code to add @st.cache_data and @st.fragment to a Streamlit dashboard so filter clicks stop rerunning the whole script and reloading the data.
+environments: web
+status: Published
+feedback link: https://github.com/Snowflake-Labs/sfguides/issues
+fork repo link: https://github.com/Snowflake-Labs/sfguide-speed-up-streamlit-apps-with-caching-and-fragments
+
+
+# Speed Up Streamlit Apps with Caching and Fragments
+<!-- ------------------------ -->
+## Overview
+
+A Streamlit app is easy to build until users start clicking filters. Every click reruns the whole script from top to bottom, and every data load runs again, even when nothing about the data changed. Against a Snowflake warehouse, that means repeated queries, slower widgets, and credits spent on work that didn't need to happen.
+
+In this guide, you start with a user-activity dashboard that has this problem and ask Cortex Code (CoCo) to fix it with two Streamlit features: `@st.cache_data`, which loads data once and reuses it, and `@st.fragment`, which limits a filter click to rerunning just the filter section.
+
+![Before and after: the same app without and with @st.cache_data and @st.fragment](assets/before-after-caching.png)
+
+### What You'll Learn
+- Why a Streamlit app reruns the whole script, and every data load, on each widget click
+- How `@st.cache_data` stores the result of a data load and reuses it on later calls and reruns
+- How `@st.fragment` scopes a rerun to one section of the page
+- How to prompt CoCo to apply both patterns and review the proposed diff
+
+### What You'll Build
+Two versions of the same dashboard: a "before" app with no caching and no fragment, and an "after" app with `@st.cache_data` on its three data loads and `@st.fragment` on its filter section. Each app has a timing panel so you can measure the difference yourself.
+
+The diagram below shows how the after app fits together. The filter section is a fragment that calls the cached loaders, and all of those loaders share one cached read of the data source.
+
+![Architecture of the after app: a fragment calls cached loaders that read Snowflake in SiS or the local CSV elsewhere](assets/architecture-overview.png)
+
+### Prerequisites
+- Access to a [Snowflake account](https://signup.snowflake.com/?utm_source=snowflake-devrel&utm_medium=developer-guides&utm_cta=developer-guides)
+- Access to [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code), in Snowsight or CoCo Desktop
+- Python 3.11 or later and Git
+- Basic familiarity with Streamlit
+
+<!-- ------------------------ -->
+## Setup
+
+### Clone the Companion Repo
+
+The companion repo contains both apps and a bundled CSV of 200k synthetic user events, so no Snowflake credentials are needed to run them.
+
+```bash
+git clone https://github.com/Snowflake-Labs/sfguide-speed-up-streamlit-apps-with-caching-and-fragments.git
+cd sfguide-speed-up-streamlit-apps-with-caching-and-fragments
+pip install -r after/requirements.txt
+```
+
+The repo layout:
+
+| Path | Contents |
+|---|---|
+| `before/streamlit_app.py` | The starting dashboard: no caching, no fragment |
+| `after/streamlit_app.py` | The finished dashboard, for comparing with CoCo's changes |
+| `data/user_events.csv` | 200k synthetic user events |
+
+### Run the Before App
+
+```bash
+streamlit run before/streamlit_app.py --server.port 8601
+```
+
+The dashboard opens at `http://localhost:8601`, with Region and Channel filters, metrics, a monthly active users chart, a data table, and a **Run timing** panel.
+
+<!-- ------------------------ -->
+## Explore the Before App
+
+### Find the Repeated Work
+
+The app loads its data in three functions. `load_events()` reads the data (the CSV when you run locally), and both `load_filtered()` (for the metrics and the table) and `load_mau()` (for the chart) call it:
+
+```python
+def load_events() -> pd.DataFrame:
+    session = snowflake_session()
+    if session is not None:
+        df = session.sql(
+            "SELECT EVENT_DATE, USER_ID, REGION, CHANNEL, REVENUE FROM USER_EVENTS_DEMO"
+        ).to_pandas()
+        df["EVENT_DATE"] = pd.to_datetime(df["EVENT_DATE"])
+        return df
+    try:
+        return pd.read_csv(DATA_PATH, parse_dates=["EVENT_DATE"])
+    except (FileNotFoundError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return generate_events()
+
+
+def load_filtered(regions: tuple[str, ...], channels: tuple[str, ...]) -> pd.DataFrame:
+    df = load_events()
+    return df[df["REGION"].isin(regions) & df["CHANNEL"].isin(channels)]
+
+
+def load_mau() -> pd.DataFrame:
+    df = load_events()
+    month = df["EVENT_DATE"].dt.to_period("M").dt.to_timestamp()
+    return (
+        df.groupby(month)["USER_ID"].nunique()
+        .rename("MAU").rename_axis("MONTH").reset_index()
+    )
+```
+
+Nothing is cached, so every run of the script reads the CSV twice: once through `load_filtered()` and once through `load_mau()`.
+
+### Measure a Rerun
+
+Change the Region filter a few times and watch the **Run timing** panel. Each click logs a **Full script** run, because Streamlit reruns the entire file whenever a widget changes. The average rerun takes about as long as the first run, since every rerun redoes all the work.
+
+<!-- ------------------------ -->
+## Refactor with CoCo
+
+### Ask CoCo to Diagnose
+
+Open `before/streamlit_app.py` in Cortex Code, either in Snowsight or in CoCo Desktop. Don't highlight a selection, so CoCo works with the whole file. Start by asking CoCo to find the problem rather than telling it the fix:
+
+```console
+This Streamlit app feels slow every time I change a filter. Explain what work is repeated on each rerun and how I could avoid it. Don't change any code yet.
+```
+
+CoCo should point out the same issues you found in the previous section:
+
+- Nothing is cached, so `load_events()` reads the CSV on every run
+- `load_filtered()` and `load_mau()` both call `load_events()`, so each run reads the CSV twice
+- Every filter change reruns the whole script, not just the filter section
+
+It may suggest `@st.cache_data` and `@st.fragment` on its own. Its exact wording will vary.
+
+### Prompt CoCo to Refactor
+
+Now ask for the fix. Naming the functions keeps the change focused:
+
+```console
+Add @st.cache_data to load_events(), load_filtered(), and load_mau(), and decorate filtered_section() with @st.fragment so a filter change reruns only that section. Don't change anything else.
+```
+
+### Review the Diff
+
+CoCo shows its proposed changes as a diff for you to review before accepting. Check that it:
+
+- Adds `@st.cache_data` to `load_events()`, `load_filtered()`, and `load_mau()`
+- Adds `@st.fragment` to `filtered_section()`
+- Leaves the rest of the app unchanged
+
+Accept the changes, then compare your result with the finished version in the repo:
+
+```bash
+diff before/streamlit_app.py after/streamlit_app.py
+```
+
+Besides the four decorators, this diff shows a few cosmetic differences that CoCo won't make from the prompt: the docstring, the page title, and the caption under the title. You can ignore these. Only the decorators change how the app runs.
+
+The next two sections explain what each change does.
+
+<!-- ------------------------ -->
+## Cache Data Loads
+
+### Add @st.cache_data
+
+`@st.cache_data` stores a function's return value. The next call with the same arguments returns the stored copy instead of running the function again:
+
+```python
+@st.cache_data(show_spinner="Loading events...")
+def load_events() -> pd.DataFrame:
+    session = snowflake_session()
+    if session is not None:
+        df = session.sql(
+            "SELECT EVENT_DATE, USER_ID, REGION, CHANNEL, REVENUE FROM USER_EVENTS_DEMO"
+        ).to_pandas()
+        df["EVENT_DATE"] = pd.to_datetime(df["EVENT_DATE"])
+        return df
+    try:
+        return pd.read_csv(DATA_PATH, parse_dates=["EVENT_DATE"])
+    except (FileNotFoundError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return generate_events()
+
+
+@st.cache_data(show_spinner="Filtering events...")
+def load_filtered(regions: tuple[str, ...], channels: tuple[str, ...]) -> pd.DataFrame:
+    df = load_events()
+    return df[df["REGION"].isin(regions) & df["CHANNEL"].isin(channels)]
+
+
+@st.cache_data(show_spinner="Aggregating monthly active users...")
+def load_mau() -> pd.DataFrame:
+    df = load_events()
+    month = df["EVENT_DATE"].dt.to_period("M").dt.to_timestamp()
+    return (
+        df.groupby(month)["USER_ID"].nunique()
+        .rename("MAU").rename_axis("MONTH").reset_index()
+    )
+```
+
+### What Changes on Each Run
+
+- **First run:** `load_filtered()` calls `load_events()`, which reads the CSV and caches the result. When `load_mau()` calls `load_events()`, it gets the cached copy, so the CSV is read once instead of twice.
+- **Reruns:** `load_filtered()` and `load_mau()` are cached too, so a repeat filter selection returns from the cache without reading the CSV at all.
+- **Cache keys:** The function arguments are part of the cache key. Each Region and Channel combination is computed once, and picking it again returns the stored result.
+
+### Things to Know
+
+- The cache is shared across all users and sessions of the app, not just your browser tab. If someone else already filled it, your "first run" is already fast.
+- The apps include a **Reset cache** button that calls `st.cache_data.clear()`, so you can measure from an empty cache.
+- For data that changes, set a `ttl`, for example `@st.cache_data(ttl="10m")`, so cached results expire and reload.
+
+<!-- ------------------------ -->
+## Isolate Filters with Fragments
+
+### Add @st.fragment
+
+Without a fragment, any widget change reruns the whole script. With `@st.fragment`, a widget change inside the decorated function reruns only that function:
+
+```python
+@st.fragment
+def filtered_section() -> None:
+    start = run_start if st.session_state.get("full_run") else time.perf_counter()
+    show_filtered_data()
+    render_timing(start)
+
+
+st.subheader("Input")
+filtered_section()
+```
+
+The Region and Channel filters live inside `filtered_section()`, so changing a filter now reruns just this section. The **Run timing** panel logs these runs as **Fragment only** instead of **Full script**.
+
+### When Fragments Help Most
+
+In this small app, the fragment covers most of the page, so most of the speedup comes from caching. Fragments pay off more as an app grows: a filter section in a fragment won't rerun other charts, tabs, or expensive sections elsewhere on the page.
+
+<!-- ------------------------ -->
+## Compare the Results
+
+Run both apps side by side:
+
+```bash
+streamlit run before/streamlit_app.py --server.port 8601
+streamlit run after/streamlit_app.py --server.port 8602
+```
+
+In each app, click **Reset cache**, then change the Region filter a few times. In testing, the two apps compared like this:
+
+| | Before | After |
+|---|---|---|
+| First run | ~0.5s (2 CSV reads) | ~0.3s (1 CSV read) |
+| Avg rerun | ~0.5s (2 CSV reads again) | ~0.02s (0 reads, fragment only) |
+
+Your numbers will vary with hardware, but the pattern holds: the before app redoes all its work on every click, and the after app reuses it. The gap is larger against a Snowflake warehouse, where each uncached rerun is a round trip to run a query.
+
+<!-- ------------------------ -->
+## Load from Snowflake
+
+Both apps pick their data source based on where they run. A helper, `snowflake_session()`, returns the app's Snowpark session when the app runs in Streamlit in Snowflake, and `None` everywhere else:
+
+```python
+def snowflake_session():
+    try:
+        # Container runtime: the SPCS service mounts a session token here.
+        if Path("/snowflake/session/token").exists():
+            return st.connection("snowflake").session()
+        # Warehouse runtime: Snowpark provides the active session.
+        from snowflake.snowpark.context import get_active_session
+        return get_active_session()
+    except Exception:
+        return None
+```
+
+- **Locally or on Streamlit Community Cloud:** there's no Snowflake session, so `load_events()` reads `data/user_events.csv`. No credentials are needed.
+- **In Streamlit in Snowflake:** `load_events()` queries the `USER_EVENTS_DEMO` table using the app owner's role.
+
+To run the after app in Streamlit in Snowflake:
+
+1. Load the contents of `data/user_events.csv` into a table named `USER_EVENTS_DEMO` in the database and schema where you'll create the app, or change the query to point at your own table with the same columns.
+2. Create a Streamlit app in Snowsight and paste in the contents of `after/streamlit_app.py`.
+3. Run the app. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
+
+`load_filtered()` and `load_mau()` don't change. They still call `load_events()`, so caching saves a query instead of a CSV read. Each uncached rerun would otherwise use warehouse time.
+
+To point the query at a different table, ask CoCo:
+
+```console
+Change the query in load_events() to read from MY_DB.MY_SCHEMA.MY_EVENTS, and keep the column names the same.
+```
+
+<!-- ------------------------ -->
+## Conclusion And Resources
+
+Congratulations! You've successfully used Cortex Code to speed up a Streamlit dashboard with `@st.cache_data` and `@st.fragment`. Filter clicks in the after app reuse cached data and rerun only the filter section, instead of reloading everything on every click.
+
+### What You Learned
+- Every widget click reruns a Streamlit script, including every data load, unless you cache it
+- `@st.cache_data` stores results by function arguments and reuses them within a run, across reruns, and across sessions
+- `@st.fragment` scopes a widget's rerun to a single section of the page
+- CoCo can diagnose why an app is slow, and apply both patterns, with each change shown as a diff for review
+
+### Related Resources
+
+Documentation:
+- [st.cache_data](https://docs.streamlit.io/develop/api-reference/caching-and-state/st.cache_data)
+- [Caching overview](https://docs.streamlit.io/develop/concepts/architecture/caching)
+- [st.fragment](https://docs.streamlit.io/develop/api-reference/execution-flow/st.fragment)
+- [Working with fragments](https://docs.streamlit.io/develop/concepts/architecture/fragments)
+- [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code)
+- [Connect Streamlit to Snowflake](https://docs.streamlit.io/develop/tutorials/databases/snowflake)
+
+Companion Repo:
+- [sfguide-speed-up-streamlit-apps-with-caching-and-fragments](https://github.com/Snowflake-Labs/sfguide-speed-up-streamlit-apps-with-caching-and-fragments)
