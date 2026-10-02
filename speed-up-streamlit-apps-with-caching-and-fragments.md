@@ -57,6 +57,7 @@ The repo layout:
 |---|---|
 | `before/streamlit_app.py` | The starting dashboard: no caching, no fragment |
 | `after/streamlit_app.py` | The finished dashboard, for comparing with CoCo's changes |
+| `before/pyproject.toml`, `after/pyproject.toml` | Packages for Streamlit in Snowflake, including Snowpark |
 | `data/user_events.csv` | 200k synthetic user events |
 
 ### Run the Before App
@@ -64,6 +65,8 @@ The repo layout:
 ```bash
 streamlit run before/streamlit_app.py --server.port 8601
 ```
+
+If your shell can't find the `streamlit` command, run `python -m streamlit run before/streamlit_app.py --server.port 8601` instead.
 
 The dashboard opens at `http://localhost:8601`, with Region and Channel filters, metrics, a monthly active users chart, a data table, and a **Run timing** panel.
 
@@ -257,7 +260,14 @@ In each app, click **Reset cache**, then change the Region filter a few times. I
 | First run | ~1.5s (2 CSV reads, plus startup) | ~0.5s (1 CSV read) |
 | Avg rerun | ~0.8s (2 CSV reads again, full script) | ~0.07s (0 reads, fragment only) |
 
-Your numbers will vary with hardware, but the pattern holds: the before app redoes all its work on every click, and the after app reuses it. The gap is larger against a Snowflake warehouse, where each uncached rerun is a round trip to run a query.
+Your numbers will vary with hardware, but the pattern holds: the before app redoes all its work on every click, and the after app reuses it. The gap is larger in Streamlit in Snowflake, where each uncached rerun is a round trip to run a query. Running both apps there against the same table gave:
+
+| | Before | After |
+|---|---|---|
+| First run | ~5.0s (2 queries, plus container startup) | ~3.6s (1 query, plus container startup) |
+| Avg rerun | ~0.87s (2 queries again, full script) | ~0.015s (0 queries, fragment only) |
+
+Every rerun of the before app queries the warehouse twice. The after app's reruns don't touch the warehouse at all.
 
 <!-- ------------------------ -->
 ## Load from Snowflake
@@ -285,9 +295,27 @@ def snowflake_session():
 To run the after app in Streamlit in Snowflake:
 
 1. **Create the table.** In Snowsight, select **Create** » **Table** » **From File**, upload `data/user_events.csv`, pick the database and schema for the app, and name the table `USER_EVENTS_DEMO`. Your role needs USAGE on the database and CREATE TABLE on the schema. To use your own table instead, change the query in `load_events()` to point at a table with the same columns.
-2. **Create the app on a container runtime.** Create a Streamlit app in the same database and schema, and choose the container runtime when you set it up. The container runtime runs Streamlit 1.50 or later, which supports `@st.fragment`, and it shares cached values across all viewers. The warehouse runtime offers a limited selection of Streamlit versions and caches per viewer session only. Your role needs CREATE STREAMLIT on the schema, plus USAGE on a compute pool and a query warehouse.
+2. **Create the app on a container runtime.** Create a Streamlit app in the same database and schema, and choose the container runtime when you set it up. The container runtime runs Streamlit 1.50 or later, which supports `@st.fragment`, and it shares cached values across all viewers. The warehouse runtime offers a limited selection of Streamlit versions and caches per viewer session only. Your role needs CREATE STREAMLIT on the schema, plus USAGE on a compute pool, a query warehouse, and the external access integration from the next step.
 3. **Add the code and its dependencies.** Replace the app's `streamlit_app.py` and `pyproject.toml` with the files in `after/`. The repo's `pyproject.toml` lists `snowflake-snowpark-python`, which the container runtime needs to open a session. The runtime installs these packages from PyPI when it starts, so the app also needs an external access integration that allows PyPI. Ask your admin for one if you don't have it. Without it, the app fails to start with a package server error.
-4. **Run the app and confirm the source.** Run the app. The **Events** count should match `SELECT COUNT(*) FROM USER_EVENTS_DEMO WHERE REGION = 'AMER' AND CHANNEL = 'web'`. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
+4. **Run the app and confirm the source.** Run the app. The first open takes a minute or two while the container starts and installs the packages. The **Events** count should match `SELECT COUNT(*) FROM USER_EVENTS_DEMO WHERE REGION = 'AMER' AND CHANNEL = 'web'`. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
+
+If you'd rather use SQL, you can create the app from a stage after you upload the `after/` files to it. Replace the placeholders with your own names:
+
+```sql
+CREATE STREAMLIT my_db.my_schema.user_activity_after
+  FROM '@my_db.my_schema.my_stage/after'
+  MAIN_FILE = 'streamlit_app.py'
+  RUNTIME_NAME = 'SYSTEM$ST_CONTAINER_RUNTIME_PY3_11'
+  COMPUTE_POOL = my_compute_pool
+  QUERY_WAREHOUSE = my_warehouse
+  EXTERNAL_ACCESS_INTEGRATIONS = (my_pypi_access_integration);
+```
+
+If the app doesn't start, check these:
+
+- **"Failed to retrieve packages from the package server":** the app has no external access integration that allows PyPI. Attach one with `ALTER STREAMLIT ... SET EXTERNAL_ACCESS_INTEGRATIONS = (...)`.
+- **"The selected compute pool is unable to start your app":** the compute pool is at its node limit. Wait for capacity, stop other apps on the pool, or use a different pool.
+- **Numbers don't match the `COUNT(*)` query:** the app isn't reading your table. Check that `pyproject.toml` lists `snowflake-snowpark-python` and that the table is in the same database and schema as the app.
 
 `load_filtered()` and `load_mau()` don't change. They still call `load_events()`, so caching saves a query instead of a CSV read. Each uncached rerun would otherwise use warehouse time.
 
