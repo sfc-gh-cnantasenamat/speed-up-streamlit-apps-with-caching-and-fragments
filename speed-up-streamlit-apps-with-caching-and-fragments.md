@@ -36,6 +36,8 @@ The diagram below shows how the after app fits together. The filter section is a
 - Access to a [Snowflake account](https://signup.snowflake.com/?utm_source=snowflake-devrel&utm_medium=developer-guides&utm_cta=developer-guides)
 - Access to [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code), in Snowsight or CoCo Desktop
 - Python 3.11 or later and Git
+- Optional: the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/index), to deploy to Streamlit in Snowflake with `setup.sql`
+- Optional: a GitHub account, to deploy to Streamlit Community Cloud
 - Basic familiarity with Streamlit
 
 <!-- ------------------------ -->
@@ -57,8 +59,10 @@ The repo layout:
 |---|---|
 | `before/streamlit_app.py` | The starting dashboard: no caching, no fragment |
 | `after/streamlit_app.py` | The finished dashboard, for comparing with CoCo's changes |
+| `before/requirements.txt`, `after/requirements.txt` | Packages for running locally or on Streamlit Community Cloud |
 | `before/pyproject.toml`, `after/pyproject.toml` | Packages for Streamlit in Snowflake, including Snowpark |
 | `data/user_events.csv` | 200k synthetic user events |
+| `setup.sql` | Loads the CSV into a table and creates both apps in Streamlit in Snowflake |
 
 ### Run the Before App
 
@@ -70,7 +74,7 @@ If your shell can't find the `streamlit` command, run `python -m streamlit run b
 
 The dashboard opens at `http://localhost:8601`, with Region and Channel filters, metrics, a monthly active users chart, a data table, and a **Run timing** panel.
 
-![The before app on first load, with one Full script run in the Run timing panel](assets/before-app-first-load.png)
+![The before app on first load, with the Region and Channel filters, the Data metrics and the monthly active users chart](assets/before-app-first-load.png)
 
 <!-- ------------------------ -->
 ## Explore the Before App
@@ -257,17 +261,21 @@ In each app, click **Reset cache**, then change the Region filter a few times. I
 
 | | Before | After |
 |---|---|---|
-| First run | ~1.5s (2 CSV reads, plus startup) | ~0.5s (1 CSV read) |
-| Avg rerun | ~0.8s (2 CSV reads again, full script) | ~0.07s (0 reads, fragment only) |
+| First run | ~2.2s (2 CSV reads, plus startup) | ~0.3s (1 CSV read) |
+| Avg rerun | ~0.4s (2 CSV reads again, full script) | ~0.05s (0 reads, fragment only) |
 
 Your numbers will vary with hardware, but the pattern holds: the before app redoes all its work on every click, and the after app reuses it. The gap is larger in Streamlit in Snowflake, where each uncached rerun is a round trip to run a query. Running both apps there against the same table gave:
 
 | | Before | After |
 |---|---|---|
-| First run | ~5.0s (2 queries, plus container startup) | ~3.6s (1 query, plus container startup) |
-| Avg rerun | ~0.87s (2 queries again, full script) | ~0.015s (0 queries, fragment only) |
+| First run | ~4.1s (2 queries, plus container startup) | ~4.5s (1 query, plus container startup) |
+| Avg rerun | ~0.73s (2 queries again, full script) | ~0.017s (0 queries, fragment only) |
 
-Every rerun of the before app queries the warehouse twice. The after app's reruns don't touch the warehouse at all.
+The first runs are close because container startup dominates them. The reruns are where the apps differ: every rerun of the before app queries the warehouse twice, and the after app's reruns don't touch the warehouse at all.
+
+![The before app in Streamlit in Snowflake: every rerun is logged as Full script and takes 0.6 to 0.9 seconds](assets/sis-before-app-full-script-reruns.png)
+
+![The after app in Streamlit in Snowflake: after the first run, each rerun is logged as Fragment only and takes under 0.02 seconds](assets/sis-after-app-fragment-reruns.png)
 
 <!-- ------------------------ -->
 ## Load from Snowflake
@@ -292,24 +300,47 @@ def snowflake_session():
 - **Locally or on Streamlit Community Cloud:** there's no Snowflake session, so `load_events()` reads `data/user_events.csv`. No credentials are needed.
 - **In Streamlit in Snowflake:** `load_events()` queries the `USER_EVENTS_DEMO` table using the app owner's role.
 
-To run the after app in Streamlit in Snowflake:
+### Deploy to Streamlit Community Cloud
+
+The apps run on Community Cloud without changes, because they fall back to the bundled CSV:
+
+1. Fork the companion repo to your GitHub account.
+2. In [Streamlit Community Cloud](https://share.streamlit.io), select **Create app** » **Deploy a public app from GitHub**.
+3. Pick your fork and the `main` branch, and set the main file path to `after/streamlit_app.py`. Community Cloud installs the packages from `after/requirements.txt`.
+4. Select **Deploy**. Repeat with `before/streamlit_app.py` to compare the two apps.
+
+### Deploy to Streamlit in Snowflake
+
+To run the after app in Streamlit in Snowflake from Snowsight:
 
 1. **Create the table.** In Snowsight, select **Create** » **Table** » **From File**, upload `data/user_events.csv`, pick the database and schema for the app, and name the table `USER_EVENTS_DEMO`. Your role needs USAGE on the database and CREATE TABLE on the schema. To use your own table instead, change the query in `load_events()` to point at a table with the same columns.
 2. **Create the app on a container runtime.** Create a Streamlit app in the same database and schema, and choose the container runtime when you set it up. The container runtime runs Streamlit 1.50 or later, which supports `@st.fragment`, and it shares cached values across all viewers. The warehouse runtime offers a limited selection of Streamlit versions and caches per viewer session only. Your role needs CREATE STREAMLIT on the schema, plus USAGE on a compute pool, a query warehouse, and the external access integration from the next step.
 3. **Add the code and its dependencies.** Replace the app's `streamlit_app.py` and `pyproject.toml` with the files in `after/`. The repo's `pyproject.toml` lists `snowflake-snowpark-python`, which the container runtime needs to open a session. The runtime installs these packages from PyPI when it starts, so the app also needs an external access integration that allows PyPI. Ask your admin for one if you don't have it. Without it, the app fails to start with a package server error.
 4. **Run the app and confirm the source.** Run the app. The first open takes a minute or two while the container starts and installs the packages. The **Events** count should match `SELECT COUNT(*) FROM USER_EVENTS_DEMO WHERE REGION = 'AMER' AND CHANNEL = 'web'`. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
 
-If you'd rather use SQL, you can create the app from a stage after you upload the `after/` files to it. Replace the placeholders with your own names:
+![The after app running in Streamlit in Snowflake, showing 21,212 events for AMER and web from the USER_EVENTS_DEMO table](assets/sis-after-app-first-load.png)
+
+To compare both apps as in the table above, repeat steps 2 to 4 with the files in `before/`.
+
+If you'd rather use SQL, `setup.sql` in the repo does all of this for both apps. It creates the `USER_EVENTS_DEMO` table, uploads the CSV and both apps' `streamlit_app.py` and `pyproject.toml` files to a stage, loads the table, and creates `USER_ACTIVITY_BEFORE` and `USER_ACTIVITY_AFTER` on the container runtime. Replace the placeholders at the top of the file with your database, schema, warehouse, compute pool, and external access integration, then run it from the repo root with the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/index):
+
+```bash
+snow sql -f setup.sql
+```
+
+The file uses `PUT` to upload local files, so run it from the Snowflake CLI rather than a Snowsight worksheet. Each app is created from its own stage folder:
 
 ```sql
-CREATE STREAMLIT my_db.my_schema.user_activity_after
-  FROM '@my_db.my_schema.my_stage/after'
+CREATE OR REPLACE STREAMLIT USER_ACTIVITY_AFTER
+  FROM '@ST_CACHING_STAGE/after'
   MAIN_FILE = 'streamlit_app.py'
   RUNTIME_NAME = 'SYSTEM$ST_CONTAINER_RUNTIME_PY3_11'
-  COMPUTE_POOL = my_compute_pool
-  QUERY_WAREHOUSE = my_warehouse
-  EXTERNAL_ACCESS_INTEGRATIONS = (my_pypi_access_integration);
+  COMPUTE_POOL = MY_COMPUTE_POOL
+  QUERY_WAREHOUSE = MY_WAREHOUSE
+  EXTERNAL_ACCESS_INTEGRATIONS = (MY_PYPI_ACCESS_INTEGRATION);
 ```
+
+The last statement in the file prints the AMER and web event count, which the after app's **Events** metric should match.
 
 If the app doesn't start, check these:
 
@@ -324,6 +355,19 @@ To point the query at a different table, ask CoCo:
 ```console
 Change the query in load_events() to read from MY_DB.MY_SCHEMA.MY_EVENTS, and keep the column names the same.
 ```
+
+### Clean Up
+
+When you're done, drop the objects you created in Snowflake. The same statements are at the end of `setup.sql`:
+
+```sql
+DROP STREAMLIT IF EXISTS USER_ACTIVITY_BEFORE;
+DROP STREAMLIT IF EXISTS USER_ACTIVITY_AFTER;
+DROP STAGE IF EXISTS ST_CACHING_STAGE;
+DROP TABLE IF EXISTS USER_EVENTS_DEMO;
+```
+
+To remove a Community Cloud app, open its menu in your workspace and select **Delete**.
 
 <!-- ------------------------ -->
 ## Conclusion And Resources
