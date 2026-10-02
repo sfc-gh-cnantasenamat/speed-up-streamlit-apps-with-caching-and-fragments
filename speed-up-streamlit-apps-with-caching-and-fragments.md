@@ -201,7 +201,7 @@ def load_mau() -> pd.DataFrame:
 
 ### Things to Know
 
-- The cache is shared across all users and sessions of the app, not just your browser tab. If someone else already filled it, your "first run" is already fast.
+- Locally and on Community Cloud, the cache is shared across all users and sessions of the app, not just your browser tab. If someone else already filled it, your "first run" is already fast. In Streamlit in Snowflake, this holds only on the container runtime; the warehouse runtime caches within a single viewer's session.
 - The apps include a **Reset cache** button that calls `st.cache_data.clear()`, so you can measure from an empty cache.
 - For data that changes, set a `ttl`, for example `@st.cache_data(ttl="10m")`, so cached results expire and reload.
 
@@ -272,9 +272,9 @@ def snowflake_session():
 
 To run the after app in Streamlit in Snowflake:
 
-1. Load the contents of `data/user_events.csv` into a table named `USER_EVENTS_DEMO` in the database and schema where you'll create the app, or change the query to point at your own table with the same columns.
-2. Create a Streamlit app in Snowsight and paste in the contents of `after/streamlit_app.py`.
-3. Run the app. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
+1. **Create the table.** In Snowsight, select **Create** » **Table** » **From File**, upload `data/user_events.csv`, pick the database and schema for the app, and name the table `USER_EVENTS_DEMO`. Your role needs USAGE on the database and CREATE TABLE on the schema. To use your own table instead, change the query in `load_events()` to point at a table with the same columns.
+2. **Create the app on a container runtime.** Create a Streamlit app in the same database and schema, and choose the container runtime when you set it up. The container runtime runs Streamlit 1.50 or later, which supports `@st.fragment`, and it shares cached values across all viewers. The warehouse runtime offers a limited selection of Streamlit versions and caches per viewer session only. Your role needs CREATE STREAMLIT on the schema, plus USAGE on a compute pool and a query warehouse.
+3. **Add the code and run it.** Replace the app's code with the contents of `after/streamlit_app.py`, then run the app. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
 
 `load_filtered()` and `load_mau()` don't change. They still call `load_events()`, so caching saves a query instead of a CSV read. Each uncached rerun would otherwise use warehouse time.
 
@@ -304,6 +304,7 @@ Documentation:
 - [Working with fragments](https://docs.streamlit.io/develop/concepts/architecture/fragments)
 - [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code)
 - [Connect Streamlit to Snowflake](https://docs.streamlit.io/develop/tutorials/databases/snowflake)
+- [Runtime environments for Streamlit in Snowflake](https://docs.snowflake.com/en/developer-guide/streamlit/app-development/runtime-environments)
 
 Companion Repo:
 - [sfguide-speed-up-streamlit-apps-with-caching-and-fragments](https://github.com/Snowflake-Labs/sfguide-speed-up-streamlit-apps-with-caching-and-fragments)
