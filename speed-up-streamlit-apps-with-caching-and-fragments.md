@@ -356,18 +356,28 @@ To point the query at a different table, ask CoCo:
 Change the query in load_events() to read from MY_DB.MY_SCHEMA.MY_EVENTS, and keep the column names the same.
 ```
 
-### Clean Up
+<!-- ------------------------ -->
+## Clean Up
 
-When you're done, drop the objects you created in Snowflake. The same statements are at the end of `setup.sql`:
+When you're done, remove what you created so the apps stop using compute and the table stops using storage.
+
+### Snowflake Objects
+
+If you ran `setup.sql`, run these statements in the same database and schema. They're also at the end of the file:
 
 ```sql
+USE SCHEMA MY_DB.MY_SCHEMA;
 DROP STREAMLIT IF EXISTS USER_ACTIVITY_BEFORE;
 DROP STREAMLIT IF EXISTS USER_ACTIVITY_AFTER;
 DROP STAGE IF EXISTS ST_CACHING_STAGE;
 DROP TABLE IF EXISTS USER_EVENTS_DEMO;
 ```
 
-To remove a Community Cloud app, open its menu in your workspace and select **Delete**.
+If you created the apps in Snowsight instead, use the app names you chose there, and drop the `USER_EVENTS_DEMO` table you created from the file. There's no stage to drop in that case. You can also delete each app from its menu in the Snowsight list of Streamlit apps.
+
+### Local and Community Cloud Apps
+
+Stop the local apps with **Ctrl+C** in each terminal. To remove a Community Cloud app, open its menu in your workspace and select **Delete**.
 
 <!-- ------------------------ -->
 ## Conclusion And Resources
