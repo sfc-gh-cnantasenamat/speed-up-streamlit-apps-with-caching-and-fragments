@@ -266,10 +266,12 @@ Both apps pick their data source based on where they run. A helper, `snowflake_s
 
 ```python
 def snowflake_session():
+    # Container runtime: the SPCS service mounts a session token here.
+    # Errors aren't caught, so a missing Snowpark package fails loudly
+    # instead of falling back to sample data.
+    if Path("/snowflake/session/token").exists():
+        return st.connection("snowflake").session()
     try:
-        # Container runtime: the SPCS service mounts a session token here.
-        if Path("/snowflake/session/token").exists():
-            return st.connection("snowflake").session()
         # Warehouse runtime: Snowpark provides the active session.
         from snowflake.snowpark.context import get_active_session
         return get_active_session()
@@ -284,7 +286,8 @@ To run the after app in Streamlit in Snowflake:
 
 1. **Create the table.** In Snowsight, select **Create** » **Table** » **From File**, upload `data/user_events.csv`, pick the database and schema for the app, and name the table `USER_EVENTS_DEMO`. Your role needs USAGE on the database and CREATE TABLE on the schema. To use your own table instead, change the query in `load_events()` to point at a table with the same columns.
 2. **Create the app on a container runtime.** Create a Streamlit app in the same database and schema, and choose the container runtime when you set it up. The container runtime runs Streamlit 1.50 or later, which supports `@st.fragment`, and it shares cached values across all viewers. The warehouse runtime offers a limited selection of Streamlit versions and caches per viewer session only. Your role needs CREATE STREAMLIT on the schema, plus USAGE on a compute pool and a query warehouse.
-3. **Add the code and run it.** Replace the app's code with the contents of `after/streamlit_app.py`, then run the app. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
+3. **Add the code and its dependencies.** Replace the app's `streamlit_app.py` and `pyproject.toml` with the files in `after/`. The repo's `pyproject.toml` lists `snowflake-snowpark-python`, which the container runtime needs to open a session. The runtime installs these packages from PyPI when it starts, so the app also needs an external access integration that allows PyPI. Ask your admin for one if you don't have it. Without it, the app fails to start with a package server error.
+4. **Run the app and confirm the source.** Run the app. The **Events** count should match `SELECT COUNT(*) FROM USER_EVENTS_DEMO WHERE REGION = 'AMER' AND CHANNEL = 'web'`. The data now comes from the query, and `@st.cache_data` caches the query result in the same way it cached the CSV read.
 
 `load_filtered()` and `load_mau()` don't change. They still call `load_events()`, so caching saves a query instead of a CSV read. Each uncached rerun would otherwise use warehouse time.
 
